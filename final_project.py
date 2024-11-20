@@ -6,9 +6,8 @@ from std_msgs.msg import String, Float64MultiArray, UInt32
 import numpy as np
 import colorsys
 
-
 class BayesLoc:
-    def __init__(self, p0, colour_codes, colour_map):
+    def __init__(self, p0, colour_codes, colour_map, targets = []):
         self.colour_sub = rospy.Subscriber(
             "mean_img_rgb", Float64MultiArray, self.colour_callback, queue_size=1
         )
@@ -18,8 +17,10 @@ class BayesLoc:
         self.num_states = len(p0)
         self.colour_codes = colour_codes
         self.colour_map = colour_map
-        self.probability = p0
+        self.probabilities = p0
         self.state_prediction = np.zeros(self.num_states)
+
+        self.counter = 0
 
         self.cur_colour = None  # most recent measured colour
 
@@ -34,8 +35,13 @@ class BayesLoc:
         self.calibrating_colour = None
         self.moving = True
 
+        self.prediction_vals = []
+        self.updated_prediction_vals = []
+
         self.state_model_matrix = np.array([[0.85, 0.05, 0.05],[0.1, 0.9, 0.1],[0.05, 0.05, 0.85]])
         self.measurement_model_matrix = np.array([[0.6, 0.2, 0.05, 0.05], [0.2, 0.6, 0.05,0.05], [0.05, 0.05, 0.65, 0.2], [0.05, 0.05, 0.15, 0.6], [0.1, 0.1, 0.1, 0.1]])
+
+        self.targets = targets
 
     def colour_callback(self, msg):
         """
@@ -149,9 +155,11 @@ class BayesLoc:
         self.meas_colour = self.measurement_model.index(max(self.measurement_model))
         self.prediction = np.zeros(len(self.colour_map))
         if self.meas_colour == 4:
+            self.prediction = self.probabilities
             pass
         else:
             for n in range (len(colour_map)):
+                
                 if n == len(colour_map)-2:
                     surrounding = self.probabilities[n-2:]
                 elif n == len(colour_map)-1:
@@ -161,6 +169,12 @@ class BayesLoc:
 
                 # p(k+1)|p(k) * p(k)+z(k)
                 self.prediction[n] = self.state_model_matrix[0, u]*surrounding[2] + self.state_model_matrix[1, u]*surrounding[1] + self.state_model_matrix[2, u]*surrounding[2]
+            if self.prediction.index(max(self.prediction)) in self.targets and self.counter < 30:
+                self.counter += 1
+                self.moving = False
+            else:
+                self.counter = 0
+            self.state_update()
 
         # rospy.loginfo("predicting state")
         # rospy.loginfo(self.cur_colour)
@@ -173,16 +187,13 @@ class BayesLoc:
 
     def state_update(self):
         rospy.loginfo("updating state")
-        
+        self.norm_factor = 0
         for n in range(len(colour_map)):
             self.probabilities[n] = self.prediction[n]*self.measurement_model_matrix[self.meas_colour, self.colour_map[n]]
+            self.norm_factor += self.probabilities[n]
 
-        self.norm_factor = 0
-        for prob in self.probability:
-            self.norm_factor += prob
-
-        self.probability = self.probability/self.norm_factor
-        return self.probability    
+        self.probabilities = self.probabilities/self.norm_factor
+        return self.probabilities 
 
         """
         TODO: Complete the state update function: update self.probabilities
