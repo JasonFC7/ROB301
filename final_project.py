@@ -20,6 +20,7 @@ class BayesLoc:
         self.probabilities = p0
         self.prediction = p0
         self.state_prediction = np.zeros(self.num_states)
+        self.stopping = False
 
         self.counter = 0
 
@@ -28,8 +29,8 @@ class BayesLoc:
         self.rate = rospy.Rate(30)
         self.int_err = 0
         self.kp = 1/320
-        self.ki = 0.015/320
-        self.kd = 0.5/320
+        self.ki = 0/320
+        self.kd = 0/320
         self.errors = [0]  
         self.colour_vals = []
         self.calibrated = True
@@ -47,6 +48,7 @@ class BayesLoc:
 
         self.state_model_matrix = np.array([[0.85, 0.05, 0.05],[0.1, 0.9, 0.1],[0.05, 0.05, 0.85]])
         self.measurement_model_matrix = np.array([[0.6, 0.2, 0.05, 0.05], [0.2, 0.6, 0.05,0.05], [0.05, 0.05, 0.65, 0.2], [0.05, 0.05, 0.15, 0.6], [0.1, 0.1, 0.1, 0.1]])
+        print(self.measurement_model_matrix[2,2])
 
         self.targets = targets
 
@@ -81,55 +83,19 @@ class BayesLoc:
         if self.moving == 0:
             
             err = msg.data-320
-            vel.linear.x = 0.075
+            vel.linear.x = 0.05
             
-            
-            d_err1 = err - self.errors[-1] 
-            if d_err1 > 75 and len(self.errors) !=1 and self.skip_counter<20:
+            if self.colour_prob[4] > 0.075 and self.skip_counter < 75:
                 self.skip_counter += 1
-                print("skip")
-                
+
             else:
                 self.skip_counter = 0
-                if abs(self.int_err) > 2500:
-                # print("capped")
-                    self.int_err = self.int_err
-                else:
-                    self.int_err = self.int_err+err
-                vel.angular.z = -err*self.kp -self.int_err*self.ki - d_err1*self.kd
-                self.errors.append(err)
-                # print("P: {}".format(-err*self.kp))
-                # print("I: {}".format(-self.int_err*self.ki))
-                # print("D: {}".format(-d_err1*self.kd))
+                if -err*self.kp != 0:
+                    vel.angular.z = (-err*self.kp)/abs(-err*self.kp)*min(abs(err*self.kp), 0.5)*(1+self.skip_counter/40)
 
-            # if d_err1 < 1:
-            #     msg.linear.x = 0.05
-            # if abs(-err*self.kp -self.int_err*self.ki - d_err1*self.kd) >1.5:
-            #     vel.angular.z = (-err*self.kp -self.int_err*self.ki - d_err1*self.kd)/abs(-err*self.kp -self.int_err*self.ki - d_err1*self.kd)*1.5
-            # else:
-            # # d_error = d_err1*self.kd
-            # # print("d_error: {}".format(d_error))
-            # #print("p_error: {}".format(-err*self.kp))
-            # if abs(-err*self.kp) > 0.75:
-            #     vel.angular.z = (-err*self.kp)/abs(-err*self.kp)*0.75
-            #     print(vel.angular.z)
-            #     print("++++++")
-            # else:
-            #     # if abs(-err*self.kp) < 0.25:
-            #     #     vel.angular.z = 0
-            #     #     print("================")
-            #     # else:
-            #     vel.angular.z = -err*self.kp
-            #     print(vel.angular.z) 
-                #print("--------")
-            if abs(vel.angular.z) > 1:
-               vel.linear.x = 0.05
-            
-            # else:
-            #     vel.angular.z = 0
-            #     vel.linear.x = 0.1
-            #     self.errors.append(0)
-            # print(vel.linear.x)
+            if abs(vel.angular.z) > 0.25:
+               vel.linear.x = 0.0375
+
         elif self.moving == 1:
             vel.linear.x = 0
             vel.angular.z = 0
@@ -137,9 +103,6 @@ class BayesLoc:
             vel.linear.x = 0.05
             vel.angular.z = 0
             
-
-
-        self.x_vel = vel.linear.x
         self.cmd_pub.publish(vel)
         self.rate.sleep()
         
@@ -193,31 +156,32 @@ class BayesLoc:
             self.moving = 0
             self.prediction = self.probabilities
         else:
-            if self.colour_counter > 8 and self.checked == False:
-                print("updating: {}".format(self.colour_labels[self.meas_colour]))
-                self.checked = True
-                for n in range (len(colour_map)):
-                    if n == 0:
-                        surrounding = np.array([self.probabilities[-1], self.probabilities[0], self.probabilities[1]])
-                    elif n == len(colour_map)-2:
-                        surrounding = self.probabilities[n-2:]
-                    elif n == len(colour_map)-1:
-                        surrounding = np.array([self.probabilities[n-1], self.probabilities[-1], self.probabilities[0]])
-                    else:
-                        surrounding = self.probabilities[n-1:n+2]
-                    # p(k+1)|p(k) * p(k)+z(k)
-                    self.prediction[n] = self.state_model_matrix[0, u]*surrounding[2] + self.state_model_matrix[1, u]*surrounding[1] + self.state_model_matrix[2, u]*surrounding[2]
-                if self.prediction.tolist().index(max(self.prediction)) in self.targets and self.counter < 30:
+            self.skip_counter = 0
+            if (self.colour_counter > 20 and self.checked == False) or self.stopping == True:
+                if self.stopping == False:
+                    print("updating: {}".format(self.colour_labels[self.meas_colour]))
+                    self.checked = True
+                    for n in range (len(colour_map)):
+                        if n == 0:
+                            surrounding = np.array([self.probabilities[-1], self.probabilities[0], self.probabilities[1]])
+                        elif n == len(colour_map)-2:
+                            surrounding = self.probabilities[-3:]
+                        elif n == len(colour_map)-1:
+                            surrounding = np.array([self.probabilities[-2], self.probabilities[-1], self.probabilities[0]])
+                        else:
+                            surrounding = self.probabilities[n-1:n+2]
+                        # p(k+1)|p(k) * p(k)+z(k)
+                        self.prediction[n] = self.state_model_matrix[0, u]*surrounding[0] + self.state_model_matrix[1, u]*surrounding[1] + self.state_model_matrix[2, u]*surrounding[2]
+                    self.state_update()
+
+                if self.probabilities.tolist().index(max(self.probabilities)) in self.targets and self.counter < 30:
                     self.counter += 1
+                    self.stopping = True
                     self.moving = 1
                 else:
+                    self.stopping = False
                     self.counter = 0
                     self.moving = 2
-
-                if max(self.prediction) > 0.3:
-                    # pass
-                    print("At", self.prediction.tolist().index(max(self.prediction)), "with", max(self.prediction), "probability.")
-                self.state_update()
             elif self.last_colour == self.meas_colour:
                 self.colour_counter += 1
             elif self.last_colour != self.meas_colour:
@@ -243,6 +207,10 @@ class BayesLoc:
             self.norm_factor += self.probabilities[n]
 
         self.probabilities = self.probabilities/self.norm_factor
+        print(self.probabilities)
+        if max(self.probabilities) > 0.5:
+                    # pass
+            print("At", self.prediction.tolist().index(max(self.prediction)), "with", max(self.prediction), "probability.")
         return self.probabilities 
 
         """
@@ -256,7 +224,7 @@ if __name__ == "__main__":
     # This is the known map of offices by colour
     # 0: purple, 1: orange, 2: red, 3: brown, 4: line
     # current map starting at cell #2 and ending at cell #12
-    colour_map = [2, 3, 1, 0, 2, 1, 1, 0, 2, 3, 0]
+    colour_map = [2, 0, 1, 2, 0, 1, 3, 3, 0, 1, 3]
 
     # TODO calibrate these RGB values to recognize when you see a colour
     # NOTE: you may find it easier to compare colour readings using a different
@@ -264,10 +232,10 @@ if __name__ == "__main__":
     # HSV, use:
     # h, s, v = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
     colour_codes = [
-        [189.26270578125002, 138.29217390624999, 189.36151828125],  # purple
-        [243.88218390625, 141.095355703125, 101.69143664062501],  # orange
-        [225.67106742187502, 66.26505210937499, 111.897434921875],  # red
-        [209.68690078124996, 123.36574546875, 105.46604890625],  # brown
+        [170.886418828125, 120.84823132812502, 183.833909140625],  # purple
+        [238.06590539062498, 130.015980703125, 97.94329164062499],  # orange
+        [224.50469070312502, 65.34891476562498, 110.694511015625],  # red
+        [219.77502273437506, 136.64130742187498, 111.318619609375],  # brown
         [147.653547421875, 135.294512109375, 140.608622109375],  # line
     ]
 
@@ -275,7 +243,7 @@ if __name__ == "__main__":
     # PURPLE: 189.26270578125002, 138.29217390624999, 189.36151828125
     # GREEN: 149.909223046875, 183.724045859375, 143.19752929687502
     # YELLOW: 158.43043359375, 141.72061765625, 127.87986765625001
-    # ORANGE: 243.88218390625, 141.095355703125, 101.69143664062501
+    # ORANGE: 238.06590539062498, 130.015980703125, 97.94329164062499
     # RED: 225.67106742187502, 66.26505210937499, 111.897434921875
     # BROWN: 209.68690078124996, 123.36574546875, 105.46604890625
     # WHITE LINE: 147.653547421875, 135.294512109375, 140.608622109375
@@ -284,7 +252,7 @@ if __name__ == "__main__":
     # initial probability of being at a given office is uniform
     p0 = np.ones_like(colour_map) / len(colour_map)
 
-    localizer = BayesLoc(p0, colour_codes, colour_map)
+    localizer = BayesLoc(p0, colour_codes, colour_map, [5, 8, 10])
 
     # rospy.spin()
     rospy.sleep(0.5)
